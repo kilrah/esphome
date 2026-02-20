@@ -1,8 +1,10 @@
 #include "spi.h"
 #include "esphome/core/log.h"
+#include "esphome/core/gpio.h"
 #include "esphome/core/application.h"
 
-namespace esphome::spi {
+namespace esphome {
+namespace spi {
 
 const char *const TAG = "spi";
 
@@ -12,23 +14,20 @@ SPIDelegate *const SPIDelegate::NULL_DELEGATE =  // NOLINT(cppcoreguidelines-avo
 
 bool SPIDelegate::is_ready() { return true; }
 
-GPIOPin *const NullPin::NULL_PIN = new NullPin();  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
-
 SPIDelegate *SPIComponent::register_device(SPIClient *device, SPIMode mode, SPIBitOrder bit_order, uint32_t data_rate,
-                                           GPIOPin *cs_pin, bool release_device, bool write_only) {
+                                           GPIOPin *cs_pin) {
   if (this->devices_.count(device) != 0) {
-    ESP_LOGE(TAG, "Device already registered");
+    ESP_LOGE(TAG, "SPI device already registered");
     return this->devices_[device];
   }
-  SPIDelegate *delegate =
-      this->spi_bus_->get_delegate(data_rate, bit_order, mode, cs_pin, release_device, write_only);  // NOLINT
+  SPIDelegate *delegate = this->spi_bus_->get_delegate(data_rate, bit_order, mode, cs_pin);  // NOLINT
   this->devices_[device] = delegate;
   return delegate;
 }
 
 void SPIComponent::unregister_device(SPIClient *device) {
   if (this->devices_.count(device) == 0) {
-    esph_log_e(TAG, "Device not registered");
+    esph_log_e(TAG, "SPI device not registered");
     return;
   }
   delete this->devices_[device];  // NOLINT
@@ -36,12 +35,14 @@ void SPIComponent::unregister_device(SPIClient *device) {
 }
 
 void SPIComponent::setup() {
+  ESP_LOGD(TAG, "Setting up SPI bus...");
+
   if (this->sdo_pin_ == nullptr)
-    this->sdo_pin_ = NullPin::NULL_PIN;
+    this->sdo_pin_ = io_bus::NULL_PIN;
   if (this->sdi_pin_ == nullptr)
-    this->sdi_pin_ = NullPin::NULL_PIN;
+    this->sdi_pin_ = io_bus::NULL_PIN;
   if (this->clk_pin_ == nullptr) {
-    ESP_LOGE(TAG, "No clock pin");
+    ESP_LOGE(TAG, "No clock pin for SPI");
     this->mark_failed();
     return;
   }
@@ -62,11 +63,35 @@ void SPIComponent::setup() {
   }
 }
 
+void SPIByteBus::write_cmd_data(int cmd, const uint8_t *data, size_t length) {
+  ESP_LOGV(TAG, "Write cmd %X, length %d", cmd, (unsigned) length);
+  this->begin_transaction();
+  if (cmd != -1) {
+    this->dc_pin_->digital_write(false);
+    this->client_->write_byte(cmd);
+  }
+  if (length != 0) {
+    this->dc_pin_->digital_write(true);
+    this->write_array(data, length);
+  }
+  // note - if there is no data phase, the transaction is ended with DC still in control state, but the
+  // function must return with DC set to data state.
+  this->end_transaction();
+  this->dc_pin_->digital_write(true);
+}
+
+void SPIByteBus::dump_config() {
+  ESP_LOGCONFIG(TAG, "  SPI Mode: %u", (unsigned) this->client_->mode_);
+  ESP_LOGCONFIG(TAG, "  Data rate: %dMHz", (unsigned) (this->client_->data_rate_ / 1000000));
+  LOG_PIN("  CS Pin: ", this->client_->cs_);
+  LOG_PIN("  DC Pin: ", this->dc_pin_);
+}
+
 void SPIComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "SPI bus:");
-  LOG_PIN("  CLK Pin: ", this->clk_pin_);
-  LOG_PIN("  SDI Pin: ", this->sdi_pin_);
-  LOG_PIN("  SDO Pin: ", this->sdo_pin_);
+  LOG_PIN("  CLK Pin: ", this->clk_pin_)
+  LOG_PIN("  SDI Pin: ", this->sdi_pin_)
+  LOG_PIN("  SDO Pin: ", this->sdo_pin_)
   for (size_t i = 0; i != this->data_pins_.size(); i++) {
     ESP_LOGCONFIG(TAG, "  Data pin %u: GPIO%d", i, this->data_pins_[i]);
   }
@@ -86,7 +111,7 @@ void SPIDelegateBitBash::write(uint16_t data, size_t num_bits) { this->transfer_
 uint16_t SPIDelegateBitBash::transfer_(uint16_t data, size_t num_bits) {
   // Clock starts out at idle level
   this->clk_pin_->digital_write(clock_polarity_);
-  uint16_t out_data = 0;
+  uint8_t out_data = 0;
 
   for (uint8_t i = 0; i != num_bits; i++) {
     uint8_t shift;
@@ -118,4 +143,5 @@ uint16_t SPIDelegateBitBash::transfer_(uint16_t data, size_t num_bits) {
   return out_data;
 }
 
-}  // namespace esphome::spi
+}  // namespace spi
+}  // namespace esphome
